@@ -727,9 +727,33 @@ const viewDocumentFile = async (req, res) => {
         return res.status(500).json({ success: false, message: 'Error reading file' });
       }
     }
+    
     const contentType = doc.mimeType || 'application/octet-stream';
     res.setHeader('Content-Type', contentType);
     res.setHeader('Content-Disposition', `inline; filename="${doc.originalName || doc.filePath}"`);
+    
+    // Handle stream errors that occur during pipe operation
+    let responseSent = false;
+    const handleStreamError = (error) => {
+      if (!responseSent) {
+        responseSent = true;
+        console.error('Stream error during view:', error.message || error);
+        if (!res.headersSent) {
+          res.status(500).json({ success: false, message: 'An error occurred while viewing the document' });
+        } else {
+          res.destroy();
+        }
+      }
+    };
+    
+    stream.on('error', handleStreamError);
+    res.on('error', handleStreamError);
+    res.on('close', () => {
+      if (stream && !stream.destroyed) {
+        stream.destroy();
+      }
+    });
+    
     return stream.pipe(res);
   } catch (err) {
     console.error('viewDocumentFile error:', err.message || err);
@@ -770,7 +794,8 @@ const downloadDocumentFile = async (req, res) => {
 
     const path = require('path');
     const fs = require('fs');
-    const filePath = path.join(UPLOAD_DIR, doc.filePath);
+    // Use basename to prevent path traversal (same as view function)
+    const filePath = path.join(UPLOAD_DIR, path.basename(doc.filePath));
     if (!fs.existsSync(filePath)) return res.status(404).json({ success: false, message: 'File missing' });
 
     // audit log download
@@ -910,6 +935,29 @@ const downloadDocumentFile = async (req, res) => {
     const contentType = doc.mimeType || 'application/octet-stream';
     res.setHeader('Content-Type', contentType);
     res.setHeader('Content-Disposition', `attachment; filename="${doc.originalName || doc.filePath}"`);
+    
+    // Handle stream errors that occur during pipe operation
+    let responseSent = false;
+    const handleStreamError = (error) => {
+      if (!responseSent) {
+        responseSent = true;
+        console.error('Stream error during download:', error.message || error);
+        if (!res.headersSent) {
+          res.status(500).json({ success: false, message: 'An error occurred while downloading the document' });
+        } else {
+          res.destroy();
+        }
+      }
+    };
+    
+    downloadStream.on('error', handleStreamError);
+    res.on('error', handleStreamError);
+    res.on('close', () => {
+      if (downloadStream && !downloadStream.destroyed) {
+        downloadStream.destroy();
+      }
+    });
+    
     return downloadStream.pipe(res);
   } catch (err) {
     console.error('downloadDocumentFile error:', err.message || err);

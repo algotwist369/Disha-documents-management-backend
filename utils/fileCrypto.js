@@ -58,22 +58,35 @@ const encryptFile = (inputPath, outputPath) => new Promise((resolve, reject) => 
 const createDecryptionStream = (filePath) => {
   const key = getKey();
   if (!key) return fs.createReadStream(filePath);
-  const stats = fs.statSync(filePath);
-  const metaLen = 12 + 16; // iv + authTag
-  const dataLen = stats.size - metaLen;
-  const fd = fs.openSync(filePath, 'r');
-  // read iv and auth tag from end
-  const metaBuf = Buffer.alloc(metaLen);
-  fs.readSync(fd, metaBuf, 0, metaLen, dataLen);
-  const iv = metaBuf.slice(0, 12);
-  const authTag = metaBuf.slice(12);
+  
+  try {
+    const stats = fs.statSync(filePath);
+    const metaLen = 12 + 16; // iv + authTag
+    
+    // If file is too small to contain metadata, it's not encrypted
+    if (stats.size < metaLen) {
+      return fs.createReadStream(filePath);
+    }
+    
+    const dataLen = stats.size - metaLen;
+    const fd = fs.openSync(filePath, 'r');
+    // read iv and auth tag from end
+    const metaBuf = Buffer.alloc(metaLen);
+    fs.readSync(fd, metaBuf, 0, metaLen, dataLen);
+    const iv = metaBuf.slice(0, 12);
+    const authTag = metaBuf.slice(12);
 
-  const decipher = crypto.createDecipheriv(ALGORITHM, key, iv);
-  decipher.setAuthTag(authTag);
+    const decipher = crypto.createDecipheriv(ALGORITHM, key, iv);
+    decipher.setAuthTag(authTag);
 
-  // create read stream for encrypted data portion only
-  const encStream = fs.createReadStream(null, { fd, start: 0, end: dataLen - 1, autoClose: true });
-  return encStream.pipe(decipher);
+    // create read stream for encrypted data portion only
+    const encStream = fs.createReadStream(null, { fd, start: 0, end: dataLen - 1, autoClose: true });
+    return encStream.pipe(decipher);
+  } catch (err) {
+    // If decryption setup fails, return plain file stream
+    console.error('Decryption stream setup error:', err.message);
+    return fs.createReadStream(filePath);
+  }
 };
 
 module.exports = {
