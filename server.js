@@ -1,7 +1,6 @@
 const express = require('express');
 const http = require('http');
 const { Server } = require('socket.io');
-const dotenv = require('dotenv');
 const connectDB = require('./config/db');
 const cors = require('cors');
 const helmet = require('helmet');
@@ -14,7 +13,7 @@ const {
   requestSizeCheck
 } = require('./middleware/securityMiddleware');
 
-dotenv.config();
+require('dotenv').config();
 
 // Validate critical environment variables
 const requiredEnvVars = ['MONGO_URI', 'JWT_SECRET'];
@@ -60,23 +59,49 @@ app.use(helmet({
 
 // CORS configuration - restrict origins in production
 // Split and trim to allow values like "https://369.ciphra.in" even if spaces exist in .env
-const allowedOrigins = process.env.ALLOWED_ORIGINS 
+const allowedOrigins = process.env.ALLOWED_ORIGINS || 'https://ddm.api.d0s369.co.in'
   ? process.env.ALLOWED_ORIGINS.split(',').map(s => s.trim()).filter(Boolean)
   : process.env.NODE_ENV === 'production' 
     ? [] // Production: require explicit ALLOWED_ORIGINS
     : ['http://localhost:3000', 'http://localhost:5173']; // Development fallback
 
+// Debug logging for CORS
+console.log('🔒 CORS Configuration:');
+console.log('  - NODE_ENV:', process.env.NODE_ENV);
+console.log('  - ALLOWED_ORIGINS:', allowedOrigins);
+console.log('  - ALLOWED_ORIGINS from env:', process.env.ALLOWED_ORIGINS);
+
 app.use(cors({
   origin: (origin, callback) => {
     // Allow requests with no origin (mobile apps, postman, etc)
-    if (!origin) return callback(null, true);
-    if (allowedOrigins.indexOf(origin) !== -1 || process.env.NODE_ENV !== 'production') {
+    if (!origin) {
+      console.log('⚠️ Request with no origin - allowing');
+      return callback(null, true);
+    }
+    
+    // Log origin for debugging
+    console.log('🌐 CORS check - Origin:', origin);
+    console.log('🌐 CORS check - Allowed origins:', allowedOrigins);
+    
+    // Check if origin is in allowed list
+    if (allowedOrigins.indexOf(origin) !== -1) {
+      console.log('✅ CORS allowed for origin:', origin);
+      callback(null, true);
+    } else if (process.env.NODE_ENV !== 'production') {
+      // Development mode - allow all
+      console.log('✅ CORS allowed (development mode)');
       callback(null, true);
     } else {
-      callback(new Error('Not allowed by CORS'));
+      // Production mode - reject
+      console.error('❌ CORS blocked for origin:', origin);
+      console.error('   Expected one of:', allowedOrigins);
+      callback(new Error(`Not allowed by CORS. Origin: ${origin} not in allowed list.`));
     }
   },
-  credentials: true
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS', 'PATCH'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-Requested-With'],
+  exposedHeaders: ['Content-Range', 'X-Content-Range']
 }));
 
 // Compression middleware for better performance
@@ -166,16 +191,26 @@ let io;
 const httpServer = http.createServer(app);
 
 // Initialize Socket.IO with CORS
+// Socket.IO needs to match the same origins as Express CORS
+// For production, use explicit origins; for development, allow all
+const socketIOOrigins = process.env.NODE_ENV === 'production' 
+  ? (allowedOrigins.length > 0 ? allowedOrigins : [])
+  : '*';
+
 io = new Server(httpServer, {
   cors: {
-  origin: allowedOrigins,
+    origin: socketIOOrigins,
     methods: ['GET', 'POST'],
-    credentials: true
-  }
+    credentials: true,
+    allowedHeaders: ['Authorization', 'Content-Type']
+  },
+  transports: ['websocket', 'polling'],
+  allowEIO3: true
 });
 
 // Log allowed origins for easier debugging in production
-console.log('Allowed CORS origins:', allowedOrigins);
+console.log('🔌 Socket.IO CORS configured');
+console.log('   Allowed origins:', allowedOrigins.length > 0 ? allowedOrigins : (process.env.NODE_ENV === 'production' ? '[] (strict)' : '* (development)'));
 
 // Socket.IO connection handling
 io.on('connection', async (socket) => {
