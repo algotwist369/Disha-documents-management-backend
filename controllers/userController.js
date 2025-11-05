@@ -8,6 +8,7 @@ const PendingLoginRequest = require('../models/pendingLoginRequest');
 const BlacklistedToken = require('../models/blacklistedToken');
 const jwt = require('jsonwebtoken');
 const { parseDeviceInfo } = require('../utils/deviceParser');
+const { getClientIP } = require('../utils/ipExtractor');
 
 const JWT_SECRET = process.env.JWT_SECRET || 'change-me-in-prod';
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
@@ -97,18 +98,48 @@ const loginUser = async (req, res) => {
         
         if (securitySettings) {
             // 1. IP Whitelist Check
-            if (securitySettings.enforceIpWhitelist && securitySettings.ipWhitelist.length > 0) {
-                const allowedIPs = securitySettings.ipWhitelist.map(item => item.ip);
-                const userIP = req.ip;
+            if (securitySettings.enforceIpWhitelist && securitySettings.ipWhitelist && securitySettings.ipWhitelist.length > 0) {
+                const allowedIPs = securitySettings.ipWhitelist.map(item => item.ip ? item.ip.trim() : '').filter(ip => ip);
+                const userIP = getClientIP(req);
                 
-                if (!allowedIPs.includes(userIP)) {
+                // Normalize IPs for comparison (handle IPv4, IPv6, etc.)
+                const normalizeIP = (ip) => {
+                    if (!ip) return null;
+                    let normalized = String(ip).trim();
+                    // Remove IPv6 brackets
+                    if (normalized.startsWith('[') && normalized.endsWith(']')) {
+                        normalized = normalized.slice(1, -1);
+                    }
+                    // Handle IPv6-mapped IPv4
+                    if (normalized.startsWith('::ffff:')) {
+                        normalized = normalized.replace('::ffff:', '');
+                    }
+                    // Remove any whitespace
+                    normalized = normalized.replace(/\s+/g, '');
+                    return normalized.toLowerCase();
+                };
+                
+                const normalizedUserIP = normalizeIP(userIP);
+                const normalizedAllowedIPs = allowedIPs.map(normalizeIP).filter(Boolean);
+                
+                // Debug logging
+                console.log('🔐 IP Whitelist Check:', {
+                    enforceIpWhitelist: securitySettings.enforceIpWhitelist,
+                    userIP: userIP,
+                    normalizedUserIP: normalizedUserIP,
+                    allowedIPs: allowedIPs,
+                    normalizedAllowedIPs: normalizedAllowedIPs,
+                    match: normalizedAllowedIPs.includes(normalizedUserIP)
+                });
+                
+                if (!normalizedAllowedIPs.includes(normalizedUserIP)) {
                     // Create security alert for unauthorized IP attempt
                     try {
                         const alert = await SecurityAlert.create({
                             user: user._id,
                             alertType: 'suspicious_activity',
                             severity: 'high',
-                            message: `Login attempt from unauthorized IP: ${userIP}. Allowed IPs: ${allowedIPs.join(', ')}`,
+                            message: `Login attempt from unauthorized IP: ${userIP}. Allowed IPs: ${normalizedAllowedIPs.join(', ')}`,
                             ip: userIP,
                             userAgent: req.headers['user-agent']
                         });
@@ -138,7 +169,7 @@ const loginUser = async (req, res) => {
                             await sendMail({
                                 to: adminEmail,
                                 subject: `🚨 UNAUTHORIZED IP: Login Attempt - ${user.name}`,
-                                text: `SECURITY ALERT - UNAUTHORIZED IP\n\nUser: ${user.name}\nPhone: ${user.phone}\nRole: ${user.role}\n\nUNAUTHORIZED IP DETECTED: ${userIP}\nAllowed IPs: ${allowedIPs.join(', ')}\n\nUser Agent: ${req.headers['user-agent']}\nTime: ${new Date().toISOString()}\n\nThis login attempt has been BLOCKED. Please review and take appropriate action.`
+                                text: `SECURITY ALERT - UNAUTHORIZED IP\n\nUser: ${user.name}\nPhone: ${user.phone}\nRole: ${user.role}\n\nUNAUTHORIZED IP DETECTED: ${getClientIP(req)}\nNormalized User IP: ${normalizedUserIP}\nAllowed IPs: ${normalizedAllowedIPs.join(', ')}\n\nUser Agent: ${req.headers['user-agent']}\nTime: ${new Date().toISOString()}\n\nThis login attempt has been BLOCKED. Please review and take appropriate action.`
                             });
                         } catch (err) {
                             console.error('sendMail error:', err);
@@ -195,7 +226,7 @@ const loginUser = async (req, res) => {
                             ? `Account locked after ${attemptInfo.attemptsUsed} failed login attempts`
                             : `${attemptInfo.attemptsUsed} failed login attempts (${attemptInfo.attemptsRemaining} remaining)`,
                         attemptsCount: attemptInfo.attemptsUsed,
-                        ip: req.ip,
+                        ip: getClientIP(req),
                         userAgent: req.headers['user-agent']
                     });
 
@@ -225,7 +256,7 @@ const loginUser = async (req, res) => {
                     ? `🔒 CRITICAL: Account Locked - ${user.name}`
                     : `⚠️ WARNING: Multiple Failed Login Attempts - ${user.name}`;
                 
-                const emailText = `SECURITY ALERT\n\nUser: ${user.name}\nPhone: ${user.phone}\nRole: ${user.role}\nStatus: ${attemptInfo.isLocked ? 'ACCOUNT LOCKED' : 'SUSPICIOUS ACTIVITY'}\n\nFailed Login Attempts: ${attemptInfo.attemptsUsed}\nRemaining Attempts: ${attemptInfo.attemptsRemaining}\n\nIP Address: ${req.ip}\nUser Agent: ${req.headers['user-agent']}\nTime: ${new Date().toISOString()}\n\n${attemptInfo.isLocked ? 'Account has been automatically locked for 30 minutes.' : 'Please monitor this account for suspicious activity.'}\n\nLogin to admin panel to view more details or take action.`;
+                const emailText = `SECURITY ALERT\n\nUser: ${user.name}\nPhone: ${user.phone}\nRole: ${user.role}\nStatus: ${attemptInfo.isLocked ? 'ACCOUNT LOCKED' : 'SUSPICIOUS ACTIVITY'}\n\nFailed Login Attempts: ${attemptInfo.attemptsUsed}\nRemaining Attempts: ${attemptInfo.attemptsRemaining}\n\nIP Address: ${getClientIP(req)}\nUser Agent: ${req.headers['user-agent']}\nTime: ${new Date().toISOString()}\n\n${attemptInfo.isLocked ? 'Account has been automatically locked for 30 minutes.' : 'Please monitor this account for suspicious activity.'}\n\nLogin to admin panel to view more details or take action.`;
 
                 try {
                     await sendMail({ to: adminEmail, subject: emailSubject, text: emailText });
@@ -296,7 +327,7 @@ const loginUser = async (req, res) => {
                 user: user._id, 
                 document: null, 
                 action: 'login', 
-                ip: req.ip, 
+                ip: getClientIP(req), 
                 userAgent: req.headers['user-agent'] 
             });
 
@@ -323,6 +354,7 @@ const loginUser = async (req, res) => {
 
         // ===== DEVICE/SESSION MANAGEMENT: Check for existing sessions =====
         try {
+            // ALWAYS check for existing sessions first
             const existingSessions = await Session.find({ user: user._id });
             
             // Determine max devices allowed for this user
@@ -332,10 +364,14 @@ const loginUser = async (req, res) => {
             }
             
             // Parse device information for new login
-            const deviceInfo = parseDeviceInfo(req.headers['user-agent'], req.ip);
+            const deviceInfo = parseDeviceInfo(req.headers['user-agent'], getClientIP(req));
             
-            // If user has reached max device limit, request approval from existing device
-            if (existingSessions.length >= maxDevices) {
+            // SINGLE DEVICE MODE (maxDevices === 1): Require approval if existing session exists
+            // MULTI-DEVICE MODE: Require approval if max device limit reached
+            // This ensures approval/rejection flow works for both modes
+            if ((maxDevices === 1 && existingSessions.length > 0) || 
+                (maxDevices > 1 && existingSessions.length >= maxDevices)) {
+                
                 // Create pending login request
                 const expiresAt = new Date();
                 expiresAt.setMinutes(expiresAt.getMinutes() + 5); // 5 minutes to approve
@@ -349,24 +385,46 @@ const loginUser = async (req, res) => {
                 });
                 
                 // Send approval request to existing device(s) via Socket.IO
+                const approvalData = {
+                    requestId: pendingRequest._id,
+                    deviceInfo: deviceInfo,
+                    user: {
+                        name: user.name,
+                        phone: user.phone
+                    },
+                    message: 'Someone is trying to login to your account from another device',
+                    expiresIn: 300 // 5 minutes in seconds
+                };
+
+                console.log(`📨 Sending login approval request to ${existingSessions.length} existing session(s)`);
+                
                 for (const existingSession of existingSessions) {
+                    console.log(`  - Session ID: ${existingSession._id}, Socket ID: ${existingSession.socketId || 'NOT SET'}`);
+                    
                     if (global.io && existingSession.socketId) {
-                        global.io.to(existingSession.socketId).emit('login-approval-request', {
-                            requestId: pendingRequest._id,
-                            deviceInfo: deviceInfo,
-                            user: {
-                                name: user.name,
-                                phone: user.phone
-                            },
-                            message: 'Someone is trying to login to your account from another device',
-                            expiresIn: 300 // 5 minutes in seconds
-                        });
+                        // Check if socket is still connected
+                        const socket = global.io.sockets.sockets.get(existingSession.socketId);
+                        if (socket && socket.connected) {
+                            console.log(`  ✅ Emitting to socket ${existingSession.socketId}`);
+                            global.io.to(existingSession.socketId).emit('login-approval-request', approvalData);
+                        } else {
+                            console.log(`  ⚠️ Socket ${existingSession.socketId} is not connected, trying to emit anyway`);
+                            global.io.to(existingSession.socketId).emit('login-approval-request', approvalData);
+                        }
+                    } else {
+                        console.log(`  ❌ Cannot emit: global.io=${!!global.io}, socketId=${!!existingSession.socketId}`);
+                        // Try to find socket by user ID if socketId is missing
+                        if (global.io && !existingSession.socketId) {
+                            console.log(`  🔍 Searching for socket by user ID...`);
+                            // Broadcast to all sockets and let them filter (not ideal but fallback)
+                            global.io.emit('login-approval-request', approvalData);
+                        }
                     }
                 }
                 
-                console.log(`Login approval request created for user: ${user.name}`);
+                console.log(`✅ Login approval request created for user: ${user.name} (maxDevices: ${maxDevices}, existingSessions: ${existingSessions.length})`);
                 
-                // Return "pending approval" response
+                // Return "pending approval" response - user must wait for approval
                 return res.status(202).json({
                     success: false,
                     pending: true,
@@ -376,7 +434,29 @@ const loginUser = async (req, res) => {
                 });
             }
 
-            // If under device limit, create session directly
+            // For single device mode, ensure no existing sessions before creating new one
+            // This is a safety measure in case we reach here without approval flow
+            if (maxDevices === 1) {
+                const remainingSessions = await Session.find({ user: user._id });
+                if (remainingSessions.length > 0) {
+                    // Force logout any remaining sessions
+                    for (const session of remainingSessions) {
+                        if (global.io && session.socketId) {
+                            global.io.to(session.socketId).emit('force-logout', {
+                                message: 'You have been logged out because you logged in from another device.',
+                                reason: 'new_device_login'
+                            });
+                            const socket = global.io.sockets.sockets.get(session.socketId);
+                            if (socket) {
+                                socket.disconnect(true);
+                            }
+                        }
+                    }
+                    await Session.deleteMany({ user: user._id });
+                    console.log(`Cleaned up ${remainingSessions.length} existing session(s) for user: ${user.name}`);
+                }
+            }
+
             const expiresAt = new Date();
             if (securitySettings && securitySettings.customSessionTimeout.enabled) {
                 const timeoutMinutes = securitySettings.customSessionTimeout.timeoutMinutes;
@@ -385,12 +465,31 @@ const loginUser = async (req, res) => {
                 expiresAt.setDate(expiresAt.getDate() + 7); // Default: 7 days expiry
             }
 
-            await Session.create({
-                user: user._id,
-                token,
-                deviceInfo,
-                expiresAt
-            });
+            // Create new session - unique constraint on user field prevents duplicates
+            // Even if two tabs try simultaneously, MongoDB will only allow one
+            try {
+                await Session.create({
+                    user: user._id,
+                    token,
+                    deviceInfo,
+                    expiresAt
+                });
+            } catch (sessionCreateError) {
+                // Handle duplicate key error (race condition)
+                if (sessionCreateError.code === 11000) {
+                    // Session already exists, delete it and try again
+                    await Session.deleteMany({ user: user._id });
+                    await Session.create({
+                        user: user._id,
+                        token,
+                        deviceInfo,
+                        expiresAt
+                    });
+                    console.log(`Race condition handled: Recreated session for user: ${user.name}`);
+                } else {
+                    throw sessionCreateError;
+                }
+            }
 
         } catch (sessionError) {
             console.error('Session management error:', sessionError);
@@ -402,7 +501,7 @@ const loginUser = async (req, res) => {
         sendMail({
             to: adminEmail,
             subject: `User login: ${user.name} (${user._id})`,
-            text: `User ${user.name} with phone ${user.phone} logged in at ${new Date().toISOString()} from IP ${req.ip} UA ${req.headers['user-agent']}`
+            text: `User ${user.name} with phone ${user.phone} logged in at ${new Date().toISOString()} from IP ${getClientIP(req)} UA ${req.headers['user-agent']}`
         }).catch(err => console.error('sendMail error', err));
 
         res.status(200).json({ 
@@ -620,7 +719,7 @@ const logoutUser = async (req, res) => {
                 user: userId,
                 document: null,
                 action: 'logout',
-                ip: req.ip,
+                ip: getClientIP(req),
                 userAgent: req.headers['user-agent']
             });
 
@@ -661,3 +760,220 @@ module.exports = {
     rejectLoginRequest,
     checkLoginRequestStatus
 };
+
+// ========== ADDITIONAL ENDPOINTS ==========
+// List basic users (for permissions selection)
+// Returns minimal fields and is available to any authenticated user
+module.exports.listUsersBasic = async (req, res) => {
+    try {
+        if (!req.user) {
+            return res.status(401).json({ success: false, message: 'Not authenticated' });
+        }
+
+        const page = parseInt(req.query.page) || 1;
+        const limit = Math.min(parseInt(req.query.limit) || 100, 200);
+        const skip = (page - 1) * limit;
+
+        const search = (req.query.search || '').trim();
+        const query = {};
+        if (search) {
+            query.$or = [
+                { name: { $regex: search, $options: 'i' } },
+                { phone: { $regex: search, $options: 'i' } }
+            ];
+        }
+
+        const [users, total] = await Promise.all([
+            User.find(query)
+                .select('_id name phone role')
+                .sort({ name: 1 })
+                .skip(skip)
+                .limit(limit)
+                .lean(),
+            User.countDocuments(query)
+        ]);
+
+        res.json({
+            success: true,
+            count: users.length,
+            total,
+            page,
+            pages: Math.ceil(total / limit),
+            data: users
+        });
+    } catch (error) {
+        console.error('listUsersBasic error:', error);
+        res.status(500).json({ success: false, message: 'Server error' });
+    }
+};
+
+// Update notification preferences
+const updateNotificationPreferences = async (req, res) => {
+    try {
+        const user = req.user;
+        if (!user) return res.status(401).json({ success: false, message: 'Not authenticated' });
+
+        // Don't allow super admin to change notification preferences
+        if (user.role === 'super_admin') {
+            return res.status(403).json({ success: false, message: 'Super admin cannot change notification preferences' });
+        }
+
+        const { email, emailOnView, emailOnDownload, dashboardOnView, dashboardOnDownload } = req.body;
+
+        const updateData = {
+            'notifications.emailOnView': emailOnView !== undefined ? emailOnView : user.notifications?.emailOnView || false,
+            'notifications.emailOnDownload': emailOnDownload !== undefined ? emailOnDownload : user.notifications?.emailOnDownload || false,
+            'notifications.dashboardOnView': dashboardOnView !== undefined ? dashboardOnView : user.notifications?.dashboardOnView !== false,
+            'notifications.dashboardOnDownload': dashboardOnDownload !== undefined ? dashboardOnDownload : user.notifications?.dashboardOnDownload !== false
+        };
+
+        // Update email if provided
+        if (email !== undefined) {
+            // Basic email validation
+            const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+            if (email && !emailRegex.test(email)) {
+                return res.status(400).json({ success: false, message: 'Invalid email format' });
+            }
+            updateData.email = email || '';
+        }
+
+        const updatedUser = await User.findByIdAndUpdate(
+            user._id,
+            { $set: updateData },
+            { new: true, select: 'name phone email role notifications' }
+        );
+
+        res.json({ success: true, data: updatedUser });
+    } catch (error) {
+        console.error('updateNotificationPreferences error:', error);
+        res.status(500).json({ success: false, message: 'Server error' });
+    }
+};
+
+// Get notifications for current user
+const getNotifications = async (req, res) => {
+    try {
+        const user = req.user;
+        if (!user) return res.status(401).json({ success: false, message: 'Not authenticated' });
+
+        // Don't return notifications for super admin
+        if (user.role === 'super_admin') {
+            return res.json({ success: true, data: [], count: 0 });
+        }
+
+        const Notification = require('../models/notificationModel');
+        const page = parseInt(req.query.page) || 1;
+        const limit = Math.min(parseInt(req.query.limit) || 20, 100);
+        const skip = (page - 1) * limit;
+
+        const [notifications, total] = await Promise.all([
+            Notification.find({ user: user._id })
+                .populate('document', 'originalName companyName')
+                .populate('viewedBy', 'name phone')
+                .sort({ createdAt: -1 })
+                .skip(skip)
+                .limit(limit)
+                .lean(),
+            Notification.countDocuments({ user: user._id })
+        ]);
+
+        res.json({
+            success: true,
+            data: notifications,
+            count: notifications.length,
+            total,
+            page,
+            pages: Math.ceil(total / limit)
+        });
+    } catch (error) {
+        console.error('getNotifications error:', error);
+        res.status(500).json({ success: false, message: 'Server error' });
+    }
+};
+
+// Mark notification as read
+const markNotificationRead = async (req, res) => {
+    try {
+        const user = req.user;
+        const { notificationId } = req.params;
+        if (!user) return res.status(401).json({ success: false, message: 'Not authenticated' });
+
+        const Notification = require('../models/notificationModel');
+        const notification = await Notification.findOne({ _id: notificationId, user: user._id });
+
+        if (!notification) {
+            return res.status(404).json({ success: false, message: 'Notification not found' });
+        }
+
+        notification.read = true;
+        await notification.save();
+
+        res.json({ success: true, data: notification });
+    } catch (error) {
+        console.error('markNotificationRead error:', error);
+        res.status(500).json({ success: false, message: 'Server error' });
+    }
+};
+
+// Delete notification
+const deleteNotification = async (req, res) => {
+    try {
+        const user = req.user;
+        const { notificationId } = req.params;
+        if (!user) return res.status(401).json({ success: false, message: 'Not authenticated' });
+
+        const Notification = require('../models/notificationModel');
+        const notification = await Notification.findOneAndDelete({ _id: notificationId, user: user._id });
+
+        if (!notification) {
+            return res.status(404).json({ success: false, message: 'Notification not found' });
+        }
+
+        res.json({ success: true, message: 'Notification deleted' });
+    } catch (error) {
+        console.error('deleteNotification error:', error);
+        res.status(500).json({ success: false, message: 'Server error' });
+    }
+};
+
+// Delete all notifications
+const deleteAllNotifications = async (req, res) => {
+    try {
+        const user = req.user;
+        if (!user) return res.status(401).json({ success: false, message: 'Not authenticated' });
+
+        // Don't allow super admin
+        if (user.role === 'super_admin') {
+            return res.status(403).json({ success: false, message: 'Super admin cannot delete notifications' });
+        }
+
+        const Notification = require('../models/notificationModel');
+        await Notification.deleteMany({ user: user._id });
+
+        res.json({ success: true, message: 'All notifications deleted' });
+    } catch (error) {
+        console.error('deleteAllNotifications error:', error);
+        res.status(500).json({ success: false, message: 'Server error' });
+    }
+};
+
+// Get current user profile (for email)
+const getCurrentUser = async (req, res) => {
+    try {
+        const user = req.user;
+        if (!user) return res.status(401).json({ success: false, message: 'Not authenticated' });
+
+        const currentUser = await User.findById(user._id).select('name phone email role notifications').lean();
+        res.json({ success: true, data: currentUser });
+    } catch (error) {
+        console.error('getCurrentUser error:', error);
+        res.status(500).json({ success: false, message: 'Server error' });
+    }
+};
+
+module.exports.updateNotificationPreferences = updateNotificationPreferences;
+module.exports.getNotifications = getNotifications;
+module.exports.markNotificationRead = markNotificationRead;
+module.exports.deleteNotification = deleteNotification;
+module.exports.deleteAllNotifications = deleteAllNotifications;
+module.exports.getCurrentUser = getCurrentUser;

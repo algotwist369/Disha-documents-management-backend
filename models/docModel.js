@@ -1,7 +1,7 @@
 const mongoose = require('mongoose');
 
 const docSchema = new mongoose.Schema({
-    user:{
+    user: {
         type: mongoose.Schema.Types.ObjectId,
         ref: 'User',
         required: true
@@ -13,9 +13,14 @@ const docSchema = new mongoose.Schema({
     },
     fileType: [{
         type: String,
-        enum: ['ITR', 'GST', 'BankStatement', 'Other'],
+        enum: ['Company ITR', 'Company GST', 'Persional ITR', 'BankStatement', 'Land Doc', 'Shop Doc', 'Flat Doc', 'Hotel Doc', 'Other'],
         required: true
     }],
+    category: {
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'Category',
+        required: false  // Optional to maintain backward compatibility
+    },
     filePath: {
         type: String,
         required: true,
@@ -35,10 +40,25 @@ const docSchema = new mongoose.Schema({
         type: Number,
         required: false
     },
-    createdAt: {
-        type: Date,
-        default: Date.now
+    isCompressed: {
+        type: Boolean,
+        default: false
     },
+    permissionToView: [{
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+        required: true
+    }],
+    permissionToDownload: [{
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+        required: true
+    }],
+    permissionToDelete: [{
+        type: mongoose.Schema.Types.ObjectId,
+        ref: 'User',
+        required: true
+    }],
     updatedAt: {
         type: Date,
         default: Date.now
@@ -50,6 +70,9 @@ docSchema.index({ user: 1, createdAt: -1 });
 docSchema.index({ companyName: 1 });
 docSchema.index({ fileType: 1 });
 docSchema.index({ user: 1, fileType: 1 });
+docSchema.index({ category: 1 });
+docSchema.index({ user: 1, category: 1 });
+docSchema.index({ permissionToView: 1 });
 // Text index for search across company name and original file name
 docSchema.index({ companyName: 'text', originalName: 'text' });
 

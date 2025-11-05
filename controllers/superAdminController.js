@@ -3,6 +3,7 @@ const Category = require('../models/categoryModel');
 const Doc = require('../models/docModel');
 const AuditLog = require('../models/auditLog');
 const SecurityAlert = require('../models/securityAlertModel');
+const { getClientIP } = require('../utils/ipExtractor');
 const UserSecuritySettings = require('../models/userSecuritySettings');
 const Session = require('../models/sessionModel');
 const BlacklistedToken = require('../models/blacklistedToken');
@@ -234,7 +235,7 @@ const lockUserAccount = async (req, res) => {
                 alertType: 'account_locked',
                 severity: 'critical',
                 message: `Account locked by administrator for ${duration} minute(s)`,
-                ip: req.ip,
+                ip: getClientIP(req),
                 userAgent: req.headers['user-agent']
             });
 
@@ -255,7 +256,7 @@ const lockUserAccount = async (req, res) => {
                 await sendMail({
                     to: adminEmail,
                     subject: `🔒 Account Locked by Admin - ${user.name}`,
-                    text: `User ${user.name} (${user.phone}) was locked by an administrator for ${duration} minute(s).\n\nIP: ${req.ip}\nUser Agent: ${req.headers['user-agent']}\nTime: ${new Date().toISOString()}`
+                    text: `User ${user.name} (${user.phone}) was locked by an administrator for ${duration} minute(s).\n\nIP: ${getClientIP(req)}\nUser Agent: ${req.headers['user-agent']}\nTime: ${new Date().toISOString()}`
                 });
             } catch (err) {
                 console.error('Error sending lock notification email:', err);
@@ -570,9 +571,16 @@ const getAllDocuments = async (req, res) => {
             query.user = req.query.userId;
         }
 
-        // Filter by category
+        // Filter by category (ObjectId)
+        if (req.query.category) {
+            query.category = req.query.category;
+        }
+        // Filter by fileType (string or comma-separated)
         if (req.query.fileType) {
-            query.fileType = req.query.fileType;
+            const fileTypes = Array.isArray(req.query.fileType)
+                ? req.query.fileType
+                : req.query.fileType.split(',').map(t => t.trim());
+            query.fileType = { $in: fileTypes };
         }
 
         // Search
@@ -586,6 +594,7 @@ const getAllDocuments = async (req, res) => {
         const [documents, total] = await Promise.all([
             Doc.find(query)
                 .populate('user', 'name phone role')
+                .populate('category', 'name description')
                 .sort({ createdAt: -1 })
                 .skip(skip)
                 .limit(limit)
@@ -919,10 +928,13 @@ const addIpToWhitelist = async (req, res) => {
             return res.status(400).json({ success: false, message: 'IP address is required' });
         }
         
-        // Validate IP format (basic)
+        // Normalize and validate IP
+        const normalizedIP = ip.trim().replace(/\s+/g, '');
+        
+        // Validate IP format (basic IPv4)
         const ipRegex = /^(\d{1,3}\.){3}\d{1,3}$/;
-        if (!ipRegex.test(ip)) {
-            return res.status(400).json({ success: false, message: 'Invalid IP address format' });
+        if (!ipRegex.test(normalizedIP)) {
+            return res.status(400).json({ success: false, message: 'Invalid IP address format. Please provide a valid IPv4 address (e.g., 192.168.1.100)' });
         }
         
         let settings = await UserSecuritySettings.findOne({ user: userId });
@@ -934,15 +946,18 @@ const addIpToWhitelist = async (req, res) => {
             });
         }
         
-        // Check if IP already exists
-        const ipExists = settings.ipWhitelist.some(item => item.ip === ip);
+        // Check if IP already exists (normalize both for comparison)
+        const ipExists = settings.ipWhitelist.some(item => {
+            const existingIP = item.ip ? item.ip.trim().replace(/\s+/g, '') : '';
+            return existingIP.toLowerCase() === normalizedIP.toLowerCase();
+        });
         if (ipExists) {
             return res.status(400).json({ success: false, message: 'IP address already in whitelist' });
         }
         
         settings.ipWhitelist.push({
-            ip,
-            description: description || '',
+            ip: normalizedIP,
+            description: (description || '').trim(),
             addedBy: req.user._id
         });
         

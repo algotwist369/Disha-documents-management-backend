@@ -62,7 +62,9 @@ app.use(helmet({
 // Split and trim to allow values like "https://369.ciphra.in" even if spaces exist in .env
 const allowedOrigins = process.env.ALLOWED_ORIGINS 
   ? process.env.ALLOWED_ORIGINS.split(',').map(s => s.trim()).filter(Boolean)
-  : ['http://localhost:3000', 'http://localhost:5173'];
+  : process.env.NODE_ENV === 'production' 
+    ? [] // Production: require explicit ALLOWED_ORIGINS
+    : ['http://localhost:3000', 'http://localhost:5173']; // Development fallback
 
 app.use(cors({
   origin: (origin, callback) => {
@@ -92,7 +94,26 @@ app.use(express.json({ limit: '10mb' }));
 app.use(express.urlencoded({ extended: true, limit: '10mb' }));
 
 // Trust proxy for correct IP and proto when behind reverse proxy
+// This is CRITICAL for getting real client IPs in production
 app.set('trust proxy', true);
+
+// Middleware to log IP extraction details (for debugging)
+app.use((req, res, next) => {
+    // Only log in development or if explicitly enabled
+    if (process.env.NODE_ENV !== 'production' || process.env.DEBUG_IP === 'true') {
+        const { getClientIP } = require('./utils/ipExtractor');
+        const extractedIP = getClientIP(req);
+        console.log('📡 Request IP Info:', {
+            extractedIP,
+            'x-forwarded-for': req.headers['x-forwarded-for'],
+            'x-real-ip': req.headers['x-real-ip'],
+            'cf-connecting-ip': req.headers['cf-connecting-ip'],
+            'req.ip': req.ip,
+            'remoteAddress': req.connection?.remoteAddress || req.socket?.remoteAddress
+        });
+    }
+    next();
+});
 
 // ========== SECURITY MIDDLEWARE ==========
 // NoSQL Injection Prevention
@@ -163,10 +184,16 @@ io.on('connection', async (socket) => {
   // Store user ID from handshake auth
   const token = socket.handshake.auth.token;
   
-  // Update session with socket ID
+  // Update session with socket ID and join user room for notifications
   if (token) {
     try {
       const Session = require('./models/sessionModel');
+      const jwt = require('jsonwebtoken');
+      const JWT_SECRET = process.env.JWT_SECRET || 'change-me-in-prod';
+      
+      const decoded = jwt.verify(token, JWT_SECRET);
+      const userId = decoded.id;
+
       await Session.updateOne(
         { token },
         { 
@@ -175,6 +202,16 @@ io.on('connection', async (socket) => {
         }
       );
       console.log(`Socket ${socket.id} linked to session`);
+
+      // Join user-specific room for notifications (only if not super admin)
+      if (userId) {
+        const User = require('./models/userModel');
+        const user = await User.findById(userId);
+        if (user && user.role !== 'super_admin') {
+          socket.join(`user-${userId}`);
+          console.log(`User ${userId} joined notification room: user-${userId}`);
+        }
+      }
     } catch (err) {
       console.error('Session update error:', err);
     }
@@ -244,6 +281,21 @@ const gracefulShutdown = async (signal) => {
 // Listen for termination signals
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+
+// Global error handler middleware (must be last)
+app.use((err, req, res, next) => {
+  console.error('Global error handler:', err.message || err);
+  
+  // Don't expose internal error details in production
+  const message = process.env.NODE_ENV === 'production' 
+    ? 'An internal server error occurred' 
+    : err.message || 'An error occurred';
+  
+  res.status(err.status || 500).json({
+    success: false,
+    message: message
+  });
+});
 
 // Handle uncaught exceptions and unhandled rejections
 process.on('uncaughtException', (err) => {

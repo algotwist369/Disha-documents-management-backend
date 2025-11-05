@@ -11,10 +11,11 @@ const limiter = createRateLimiter({ windowMs: 60 * 1000, max: 20 });
 router.get('/search', protect, docController.searchDocuments);
 router.get('/stats', protect, docController.getDocumentStats);
 router.get('/category/:category', protect, docController.getDocumentsByCategory);
-
+router.get('/user/:userId', protect, docController.getDocumentsByUserId);
 // Document CRUD operations
 router.post('/', protect, uploadSingle('file'), multerErrorHandler, docController.createDocument);
 router.get('/', protect, docController.getDocuments);
+
 router.get('/:id', protect, docController.getDocumentById);
 router.put('/:id', protect, uploadSingle('file'), multerErrorHandler, docController.updateDocument);
 router.delete('/:id', protect, docController.deleteDocument);

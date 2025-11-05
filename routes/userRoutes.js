@@ -7,7 +7,14 @@ const {
     deleteUser,
     approveLoginRequest,
     rejectLoginRequest,
-    checkLoginRequestStatus
+    checkLoginRequestStatus,
+    listUsersBasic,
+    updateNotificationPreferences,
+    getNotifications,
+    markNotificationRead,
+    deleteNotification,
+    deleteAllNotifications,
+    getCurrentUser
 } = require('../controllers/userController');
 const { createRateLimiter } = require('../utils/rateLimiter');
 const { protect, requireMinRole } = require('../middleware/authMiddleware');
@@ -20,9 +27,22 @@ router.post('/login', loginLimiter, loginUser);
 router.post('/logout', protect, logoutUser); // Protected logout route
 router.delete('/:userId', protect, requireMinRole('admin'), deleteUser);
 
+// Basic users list for permissions (auth required)
+router.get('/', protect, listUsersBasic);
+
 // Login approval routes
 router.post('/login-requests/:requestId/approve', protect, approveLoginRequest);
 router.post('/login-requests/:requestId/reject', protect, rejectLoginRequest);
 router.get('/login-requests/:requestId/status', checkLoginRequestStatus); // No auth needed for new device to check
+
+// Notification routes
+router.put('/notifications/preferences', protect, updateNotificationPreferences);
+router.get('/notifications', protect, getNotifications);
+router.put('/notifications/:notificationId/read', protect, markNotificationRead);
+router.delete('/notifications/:notificationId', protect, deleteNotification);
+router.delete('/notifications', protect, deleteAllNotifications);
+
+// User profile routes
+router.get('/me', protect, getCurrentUser);
 
 module.exports = router;

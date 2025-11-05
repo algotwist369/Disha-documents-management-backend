@@ -2,6 +2,8 @@ const jwt = require('jsonwebtoken');
 const dotenv = require('dotenv');
 const User = require('../models/userModel');
 const BlacklistedToken = require('../models/blacklistedToken');
+const Session = require('../models/sessionModel');
+const UserSecuritySettings = require('../models/userSecuritySettings');
 
 dotenv.config();
 
@@ -34,9 +36,62 @@ const protect = async (req, res, next) => {
     const user = await User.findById(decoded.id).select('-password');
     if (!user) return res.status(401).json({ success: false, message: 'User not found' });
 
-    // Store token in request for logout use
+    // Validate that token is associated with an active session
+    // This prevents multiple tabs/devices from using the same token
+    const activeSession = await Session.findOne({ 
+      user: user._id, 
+      token: token 
+    });
+    
+    if (!activeSession) {
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Session expired or invalid. Please login again.',
+        reason: 'session_not_found'
+      });
+    }
+
+    // Check if session has expired (use custom timeout if enabled)
+    const now = new Date();
+    if (activeSession.expiresAt < now) {
+      await Session.deleteOne({ _id: activeSession._id });
+      return res.status(401).json({ 
+        success: false, 
+        message: 'Session expired. Please login again.',
+        reason: 'session_expired'
+      });
+    }
+
+    // Check custom session timeout from security settings
+    try {
+      const securitySettings = await UserSecuritySettings.findOne({ user: user._id });
+      if (securitySettings?.customSessionTimeout?.enabled) {
+        const timeoutMinutes = securitySettings.customSessionTimeout.timeoutMinutes || 30;
+        const timeoutMs = timeoutMinutes * 60 * 1000;
+        const sessionAge = now - activeSession.lastActivity;
+        
+        if (sessionAge > timeoutMs) {
+          await Session.deleteOne({ _id: activeSession._id });
+          return res.status(401).json({ 
+            success: false, 
+            message: `Session timeout. Maximum inactivity time is ${timeoutMinutes} minutes. Please login again.`,
+            reason: 'session_timeout'
+          });
+        }
+      }
+    } catch (err) {
+      console.error('Error checking custom session timeout:', err);
+      // Continue if there's an error checking security settings
+    }
+
+    // Update last activity
+    activeSession.lastActivity = new Date();
+    await activeSession.save();
+
+    // Store token and session in request for logout use
     req.token = token;
     req.user = user;
+    req.session = activeSession;
     next();
   } catch (err) {
     console.error('Auth error:', err.message || err);

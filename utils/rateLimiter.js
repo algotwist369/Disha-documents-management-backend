@@ -9,8 +9,9 @@ const createRateLimiter = (options = {}) => {
     message: { success: false, message: 'Too many requests, please try again later.' },
     // Skip failed requests (don't count them)
     skipFailedRequests: false,
-    // Trust proxy - only use forwarded IP if behind a trusted proxy
-    validate: { trustProxy: false },
+    // Trust proxy - match Express app setting
+    // This allows rate limiting to work correctly when behind a reverse proxy
+    trustProxy: true,
   });
 };
 

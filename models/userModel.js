@@ -13,6 +13,12 @@ const userSchema = new mongoose.Schema({
         trim: true,
         unique: true
     },
+    email: {
+        type: String,
+        trim: true,
+        lowercase: true,
+        default: ''
+    },
     password: {
         type: String,
         required: true,
@@ -33,6 +39,13 @@ const userSchema = new mongoose.Schema({
         type: String,
         enum: ['user', 'admin', 'super_admin'],
         default: 'user'
+    },
+    // Notification preferences
+    notifications: {
+        emailOnView: { type: Boolean, default: false },
+        emailOnDownload: { type: Boolean, default: false },
+        dashboardOnView: { type: Boolean, default: true },
+        dashboardOnDownload: { type: Boolean, default: true }
     }
 });
 
