@@ -696,6 +696,7 @@ const viewDocumentFile = async (req, res) => {
     // Notify admin about view attempt (fire-and-forget)
     const adminEmail = process.env.ADMIN_EMAIL;
     if (adminEmail) {
+      const sendMail = require('../utils/sendMail');
       sendMail({
         to: adminEmail,
         subject: `Document viewed by ${user.name} (${user._id})`,
@@ -714,6 +715,7 @@ const viewDocumentFile = async (req, res) => {
         stream = stream.pipe(zlib.createGunzip());
       }
     } catch (decryptError) {
+      console.error('Decryption error:', decryptError);
       // If decryption fails (no key), try direct file access
       try {
         stream = fs.createReadStream(filePath);
@@ -724,6 +726,7 @@ const viewDocumentFile = async (req, res) => {
         }
       } catch (fileError) {
         console.error('File stream error:', fileError);
+        console.error('File stream error stack:', fileError.stack);
         return res.status(500).json({ success: false, message: 'Error reading file' });
       }
     }
@@ -737,7 +740,13 @@ const viewDocumentFile = async (req, res) => {
     const handleStreamError = (error) => {
       if (!responseSent) {
         responseSent = true;
-        console.error('Stream error during view:', error.message || error);
+        console.error('Stream error during view:', error);
+        console.error('Stream error stack:', error.stack);
+        console.error('Stream error details:', {
+          message: error.message,
+          name: error.name,
+          code: error.code
+        });
         if (!res.headersSent) {
           res.status(500).json({ success: false, message: 'An error occurred while viewing the document' });
         } else {
@@ -756,9 +765,18 @@ const viewDocumentFile = async (req, res) => {
     
     return stream.pipe(res);
   } catch (err) {
-    console.error('viewDocumentFile error:', err.message || err);
+    console.error('viewDocumentFile error:', err);
+    console.error('Error stack:', err.stack);
+    console.error('Error details:', {
+      message: err.message,
+      name: err.name,
+      code: err.code,
+      path: err.path
+    });
     // Don't expose internal error details
-    res.status(500).json({ success: false, message: 'An error occurred while viewing the document' });
+    if (!res.headersSent) {
+      res.status(500).json({ success: false, message: 'An error occurred while viewing the document' });
+    }
   }
 };
 
@@ -887,6 +905,7 @@ const downloadDocumentFile = async (req, res) => {
     // Notify admin about download attempt (fire-and-forget)
     const adminEmail = process.env.ADMIN_EMAIL;
     if (adminEmail) {
+      const sendMail = require('../utils/sendMail');
       sendMail({
         to: adminEmail,
         subject: `Document downloaded by ${user.name} (${user._id})`,

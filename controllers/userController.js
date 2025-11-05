@@ -9,6 +9,7 @@ const BlacklistedToken = require('../models/blacklistedToken');
 const jwt = require('jsonwebtoken');
 const { parseDeviceInfo } = require('../utils/deviceParser');
 const { getClientIP } = require('../utils/ipExtractor');
+require('dotenv').config();
 
 const JWT_SECRET = process.env.JWT_SECRET || 'change-me-in-prod';
 const JWT_EXPIRES_IN = process.env.JWT_EXPIRES_IN || '7d';
@@ -164,7 +165,7 @@ const loginUser = async (req, res) => {
                         }
 
                         // Send email to admin (use fallback address if ADMIN_EMAIL not set)
-                        const adminEmail = process.env.ADMIN_EMAIL || 'ankitdos14@gmail.com';
+                        const adminEmail = process.env.ADMIN_EMAIL || 'adoc4421@gmail.com';
                         try {
                             await sendMail({
                                 to: adminEmail,
@@ -251,7 +252,7 @@ const loginUser = async (req, res) => {
                 }
 
                 // Send email notification to admin (fallback to configured address)
-                const adminEmail = process.env.ADMIN_EMAIL || 'ankitdos14@gmail.com';
+                const adminEmail = process.env.ADMIN_EMAIL || 'adoc4421@gmail.com';
                 const emailSubject = attemptInfo.isLocked 
                     ? `🔒 CRITICAL: Account Locked - ${user.name}`
                     : `⚠️ WARNING: Multiple Failed Login Attempts - ${user.name}`;
@@ -497,7 +498,7 @@ const loginUser = async (req, res) => {
         }
 
         // Notify admin about login
-        const adminEmail = process.env.ADMIN_EMAIL || 'ankitdos14@gmail.com';
+        const adminEmail = process.env.ADMIN_EMAIL || 'adoc4421@gmail.com';
         sendMail({
             to: adminEmail,
             subject: `User login: ${user.name} (${user._id})`,

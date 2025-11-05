@@ -8,6 +8,7 @@ const UserSecuritySettings = require('../models/userSecuritySettings');
 const Session = require('../models/sessionModel');
 const BlacklistedToken = require('../models/blacklistedToken');
 const bcrypt = require('bcryptjs');
+require('dotenv').config();
 
 // ==================== USER MANAGEMENT ====================
 
@@ -252,7 +253,7 @@ const lockUserAccount = async (req, res) => {
             // Send email notification to admin (fallback to configured address)
             try {
                 const sendMail = require('../utils/sendMail');
-                const adminEmail = process.env.ADMIN_EMAIL || 'ankitdos14@gmail.com';
+                const adminEmail = process.env.ADMIN_EMAIL || 'adoc4421@gmail.com';
                 await sendMail({
                     to: adminEmail,
                     subject: `🔒 Account Locked by Admin - ${user.name}`,
