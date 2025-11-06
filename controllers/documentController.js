@@ -427,7 +427,11 @@ const updateDocument = async (req, res) => {
     if (!doc) return res.status(404).json({ success: false, message: 'Document not found' });
     // Allow owner, admin, or super_admin to update
     if (user.role !== 'admin' && user.role !== 'super_admin' && doc.user.toString() !== user._id.toString()) {
-      return res.status(403).json({ success: false, message: 'Forbidden' });
+      return res.status(403).json({ 
+        success: false, 
+        message: 'You do not have permission to update this document. Only the document owner, admin, or super admin can update it.',
+        reason: 'insufficient_permissions'
+      });
     }
 
     const { companyName, fileType, category, permissionToView, permissionToDownload, permissionToDelete } = req.body;
@@ -515,7 +519,11 @@ const deleteDocument = async (req, res) => {
     if (!doc) return res.status(404).json({ success: false, message: 'Document not found' });
     // Allow owner, admin, or super_admin to delete
     if (user.role !== 'admin' && user.role !== 'super_admin' && doc.user.toString() !== user._id.toString()) {
-      return res.status(403).json({ success: false, message: 'Forbidden' });
+      return res.status(403).json({ 
+        success: false, 
+        message: 'You do not have permission to delete this document. Only the document owner, admin, or super admin can delete it.',
+        reason: 'insufficient_permissions'
+      });
     }
 
     // delete file
@@ -591,7 +599,11 @@ const viewDocumentFile = async (req, res) => {
       doc.user.toString() !== user._id.toString() &&
       !(doc.permissionToView || []).map(String).includes(user._id.toString())
     ) {
-      return res.status(403).json({ success: false, message: 'Forbidden' });
+      return res.status(403).json({ 
+        success: false, 
+        message: 'You do not have permission to view this document. Please contact the document owner to grant you view access.',
+        reason: 'view_permission_denied'
+      });
     }
 
     // Validate file path to prevent path traversal
@@ -807,7 +819,11 @@ const downloadDocumentFile = async (req, res) => {
       doc.user.toString() !== user._id.toString() &&
       !(doc.permissionToDownload || []).map(String).includes(user._id.toString())
     ) {
-      return res.status(403).json({ success: false, message: 'Forbidden' });
+      return res.status(403).json({ 
+        success: false, 
+        message: 'You do not have permission to download this document. Please contact the document owner to grant you download access.',
+        reason: 'download_permission_denied'
+      });
     }
 
     const path = require('path');

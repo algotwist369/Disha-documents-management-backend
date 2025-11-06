@@ -1,4 +1,5 @@
 const User = require('../models/userModel');
+const Doc = require('../models/docModel'); // Import Doc model for populate operations
 const sendMail = require('../utils/sendMail');
 const AuditLog = require('../models/auditLog');
 const SecurityAlert = require('../models/securityAlertModel');
@@ -65,6 +66,7 @@ const registerUser = async (req, res) => {
         });
     } catch (error) {
         console.error('Registration error:', error);
+        console.error('Error stack:', error.stack);
         res.status(500).json({ success: false, message: 'Server error' });
     }
 };
@@ -518,6 +520,7 @@ const loginUser = async (req, res) => {
         });
     } catch (error) {
         console.error('Login error:', error);
+        console.error('Error stack:', error.stack);
         res.status(500).json({ success: false, message: 'Server error' });
     }
 };
@@ -554,6 +557,7 @@ const deleteUser = async (req, res) => {
         res.status(200).json({ success: true, message: 'User deleted successfully' });
     } catch (error) {
         console.error('Delete user error:', error);
+        console.error('Error stack:', error.stack);
         res.status(500).json({ success: false, message: 'Server error' });
     }
 };
@@ -571,7 +575,11 @@ const approveLoginRequest = async (req, res) => {
         
         // Verify request belongs to logged-in user
         if (pendingRequest.user.toString() !== req.user._id.toString()) {
-            return res.status(403).json({ success: false, message: 'Unauthorized' });
+            return res.status(403).json({ 
+                success: false, 
+                message: 'You can only approve login requests that belong to your account.',
+                reason: 'unauthorized_request_approval'
+            });
         }
         
         // Mark as approved
@@ -624,6 +632,7 @@ const approveLoginRequest = async (req, res) => {
         });
     } catch (error) {
         console.error('Approve login error:', error);
+        console.error('Error stack:', error.stack);
         res.status(500).json({ success: false, message: 'Server error' });
     }
 };
@@ -641,7 +650,11 @@ const rejectLoginRequest = async (req, res) => {
         
         // Verify request belongs to logged-in user
         if (pendingRequest.user.toString() !== req.user._id.toString()) {
-            return res.status(403).json({ success: false, message: 'Unauthorized' });
+            return res.status(403).json({ 
+                success: false, 
+                message: 'You can only reject login requests that belong to your account.',
+                reason: 'unauthorized_request_rejection'
+            });
         }
         
         // Mark as rejected
@@ -664,6 +677,7 @@ const rejectLoginRequest = async (req, res) => {
         });
     } catch (error) {
         console.error('Reject login error:', error);
+        console.error('Error stack:', error.stack);
         res.status(500).json({ success: false, message: 'Server error' });
     }
 };
@@ -686,6 +700,7 @@ const checkLoginRequestStatus = async (req, res) => {
         });
     } catch (error) {
         console.error('Check login status error:', error);
+        console.error('Error stack:', error.stack);
         res.status(500).json({ success: false, message: 'Server error' });
     }
 };
@@ -694,25 +709,100 @@ const checkLoginRequestStatus = async (req, res) => {
 const logoutUser = async (req, res) => {
     try {
         const token = req.token; // Set by protect middleware
-        const userId = req.user._id;
+        const userId = req.user?._id;
+        const session = req.session; // Set by protect middleware
 
-        // Blacklist the token
-        try {
-            await BlacklistedToken.create({
-                token,
-                user: userId,
-                reason: 'logout',
-                expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) // 7 days
-            });
-        } catch (err) {
-            // Token might already be blacklisted, ignore duplicate error
-            if (err.code !== 11000) {
-                console.error('Blacklist token error:', err);
+        // Validate required data
+        if (!token) {
+            console.error('Logout attempted without token');
+            return res.status(401).json({ success: false, message: 'Token missing' });
+        }
+        if (!userId) {
+            console.error('Logout attempted without user ID');
+            return res.status(401).json({ success: false, message: 'User not found' });
+        }
+
+        // Disconnect socket if connected
+        if (global.io && session && session.socketId) {
+            try {
+                global.io.to(session.socketId).emit('force-logout', {
+                    message: 'You have been logged out successfully.',
+                    reason: 'logout'
+                });
+                
+                const socket = global.io.sockets.sockets.get(session.socketId);
+                if (socket) {
+                    socket.disconnect(true);
+                    console.log(`Socket ${session.socketId} disconnected on logout`);
+                }
+            } catch (socketError) {
+                console.error('Error disconnecting socket on logout:', socketError);
             }
         }
 
-        // Delete session
-        await Session.deleteOne({ user: userId });
+        // Blacklist the token (only if token exists)
+        if (token) {
+            try {
+                await BlacklistedToken.create({
+                    token,
+                    user: userId,
+                    reason: 'logout',
+                    expiresAt: new Date(Date.now() + 7 * 24 * 60 * 60 * 1000) // 7 days
+                });
+                console.log(`Token blacklisted for user ${userId}`);
+            } catch (err) {
+                // Token might already be blacklisted, ignore duplicate error
+                if (err.code !== 11000) {
+                    console.error('Blacklist token error:', err);
+                }
+            }
+        }
+
+        // Delete session by token (more precise than by user ID)
+        // Also delete by user ID as fallback in case token doesn't match
+        try {
+            if (session && session._id) {
+                const deleteResult = await Session.deleteOne({ _id: session._id });
+                if (deleteResult.deletedCount > 0) {
+                    console.log(`Session ${session._id} deleted for user ${userId}`);
+                } else {
+                    console.warn(`Session ${session._id} not found for deletion (user ${userId})`);
+                }
+            } else if (token) {
+                // Fallback: delete by token or user ID
+                const deletedByToken = await Session.deleteOne({ token });
+                if (deletedByToken.deletedCount === 0) {
+                    // Try by user ID as last resort
+                    const deletedByUser = await Session.deleteOne({ user: userId });
+                    if (deletedByUser.deletedCount > 0) {
+                        console.log(`Session deleted by user ID for user ${userId}`);
+                    } else {
+                        console.warn(`No session found to delete for user ${userId}`);
+                    }
+                } else {
+                    console.log(`Session deleted by token for user ${userId}`);
+                }
+            } else {
+                // Last resort: delete by user ID only
+                const deletedByUser = await Session.deleteMany({ user: userId });
+                if (deletedByUser.deletedCount > 0) {
+                    console.log(`Session(s) deleted by user ID for user ${userId} (${deletedByUser.deletedCount} session(s))`);
+                } else {
+                    console.warn(`No session found to delete for user ${userId}`);
+                }
+            }
+        } catch (sessionError) {
+            console.error('Error deleting session:', sessionError);
+            // Try alternative: delete by user ID
+            try {
+                const deletedByUser = await Session.deleteMany({ user: userId });
+                if (deletedByUser.deletedCount > 0) {
+                    console.log(`Fallback: Deleted ${deletedByUser.deletedCount} session(s) by user ID for user ${userId}`);
+                }
+            } catch (fallbackError) {
+                console.error('Error in fallback session deletion:', fallbackError);
+            }
+        }
 
         // Create audit log
         try {
@@ -748,6 +838,7 @@ const logoutUser = async (req, res) => {
         });
     } catch (error) {
         console.error('Logout error:', error);
+        console.error('Logout error stack:', error.stack);
         res.status(500).json({ success: false, message: 'Server error' });
     }
 };
@@ -804,6 +895,7 @@ module.exports.listUsersBasic = async (req, res) => {
         });
     } catch (error) {
         console.error('listUsersBasic error:', error);
+        console.error('Error stack:', error.stack);
         res.status(500).json({ success: false, message: 'Server error' });
     }
 };
@@ -844,9 +936,14 @@ const updateNotificationPreferences = async (req, res) => {
             { new: true, select: 'name phone email role notifications' }
         );
 
+        if (!updatedUser) {
+            return res.status(404).json({ success: false, message: 'User not found' });
+        }
+
         res.json({ success: true, data: updatedUser });
     } catch (error) {
         console.error('updateNotificationPreferences error:', error);
+        console.error('Error stack:', error.stack);
         res.status(500).json({ success: false, message: 'Server error' });
     }
 };
@@ -859,7 +956,7 @@ const getNotifications = async (req, res) => {
 
         // Don't return notifications for super admin
         if (user.role === 'super_admin') {
-            return res.json({ success: true, data: [], count: 0 });
+            return res.json({ success: true, data: [], count: 0, notifications: [] });
         }
 
         const Notification = require('../models/notificationModel');
@@ -867,28 +964,90 @@ const getNotifications = async (req, res) => {
         const limit = Math.min(parseInt(req.query.limit) || 20, 100);
         const skip = (page - 1) * limit;
 
-        const [notifications, total] = await Promise.all([
-            Notification.find({ user: user._id })
-                .populate('document', 'originalName companyName')
-                .populate('viewedBy', 'name phone')
-                .sort({ createdAt: -1 })
-                .skip(skip)
-                .limit(limit)
-                .lean(),
-            Notification.countDocuments({ user: user._id })
-        ]);
+        try {
+            const [notifications, total] = await Promise.all([
+                Notification.find({ user: user._id })
+                    .populate({
+                        path: 'document',
+                        select: 'originalName companyName',
+                        model: 'Document', // Explicitly specify model name
+                        strictPopulate: false // Allow populate even if document is deleted
+                    })
+                    .populate({
+                        path: 'viewedBy',
+                        select: 'name phone',
+                        strictPopulate: false
+                    })
+                    .sort({ createdAt: -1 })
+                    .skip(skip)
+                    .limit(limit)
+                    .lean(),
+                Notification.countDocuments({ user: user._id })
+            ]);
 
-        res.json({
-            success: true,
-            data: notifications,
-            count: notifications.length,
-            total,
-            page,
-            pages: Math.ceil(total / limit)
-        });
+            // Filter out notifications where document or viewedBy failed to populate
+            const validNotifications = notifications.map(notif => {
+                // If document or viewedBy is null/undefined, set to null but keep notification
+                if (!notif.document) {
+                    notif.document = null;
+                }
+                if (!notif.viewedBy) {
+                    notif.viewedBy = null;
+                }
+                return notif;
+            });
+
+            res.json({
+                success: true,
+                data: validNotifications,
+                notifications: validNotifications, // Alias for compatibility
+                count: validNotifications.length,
+                total,
+                page,
+                pages: Math.ceil(total / limit)
+            });
+        } catch (populateError) {
+            console.error('getNotifications populate error:', populateError);
+            // Fallback: return notifications without populate
+            try {
+                const [notifications, total] = await Promise.all([
+                    Notification.find({ user: user._id })
+                        .sort({ createdAt: -1 })
+                        .skip(skip)
+                        .limit(limit)
+                        .lean(),
+                    Notification.countDocuments({ user: user._id })
+                ]);
+
+                res.json({
+                    success: true,
+                    data: notifications,
+                    notifications: notifications,
+                    count: notifications.length,
+                    total,
+                    page,
+                    pages: Math.ceil(total / limit),
+                    warning: 'Some notification details could not be loaded'
+                });
+            } catch (fallbackError) {
+                console.error('getNotifications fallback error:', fallbackError);
+                throw fallbackError;
+            }
+        }
     } catch (error) {
         console.error('getNotifications error:', error);
-        res.status(500).json({ success: false, message: 'Server error' });
+        console.error('Error stack:', error.stack);
+        // Return empty array instead of error to prevent UI breakage
+        res.json({
+            success: true,
+            data: [],
+            notifications: [],
+            count: 0,
+            total: 0,
+            page: parseInt(req.query.page) || 1,
+            pages: 0,
+            error: 'Failed to load notifications'
+        });
     }
 };
 
@@ -898,6 +1057,10 @@ const markNotificationRead = async (req, res) => {
         const user = req.user;
         const { notificationId } = req.params;
         if (!user) return res.status(401).json({ success: false, message: 'Not authenticated' });
+
+        if (!notificationId || !notificationId.match(/^[0-9a-fA-F]{24}$/)) {
+            return res.status(400).json({ success: false, message: 'Invalid notification ID' });
+        }
 
         const Notification = require('../models/notificationModel');
         const notification = await Notification.findOne({ _id: notificationId, user: user._id });
@@ -912,6 +1075,7 @@ const markNotificationRead = async (req, res) => {
         res.json({ success: true, data: notification });
     } catch (error) {
         console.error('markNotificationRead error:', error);
+        console.error('Error stack:', error.stack);
         res.status(500).json({ success: false, message: 'Server error' });
     }
 };
@@ -923,6 +1087,10 @@ const deleteNotification = async (req, res) => {
         const { notificationId } = req.params;
         if (!user) return res.status(401).json({ success: false, message: 'Not authenticated' });
 
+        if (!notificationId || !notificationId.match(/^[0-9a-fA-F]{24}$/)) {
+            return res.status(400).json({ success: false, message: 'Invalid notification ID' });
+        }
+
         const Notification = require('../models/notificationModel');
         const notification = await Notification.findOneAndDelete({ _id: notificationId, user: user._id });
 
@@ -933,6 +1101,7 @@ const deleteNotification = async (req, res) => {
         res.json({ success: true, message: 'Notification deleted' });
     } catch (error) {
         console.error('deleteNotification error:', error);
+        console.error('Error stack:', error.stack);
         res.status(500).json({ success: false, message: 'Server error' });
     }
 };
@@ -949,11 +1118,16 @@ const deleteAllNotifications = async (req, res) => {
         }
 
         const Notification = require('../models/notificationModel');
-        await Notification.deleteMany({ user: user._id });
+        const result = await Notification.deleteMany({ user: user._id });
 
-        res.json({ success: true, message: 'All notifications deleted' });
+        res.json({ 
+            success: true, 
+            message: 'All notifications deleted',
+            deletedCount: result.deletedCount
+        });
     } catch (error) {
         console.error('deleteAllNotifications error:', error);
+        console.error('Error stack:', error.stack);
         res.status(500).json({ success: false, message: 'Server error' });
     }
 };
@@ -964,10 +1138,20 @@ const getCurrentUser = async (req, res) => {
         const user = req.user;
         if (!user) return res.status(401).json({ success: false, message: 'Not authenticated' });
 
+        if (!user._id) {
+            return res.status(400).json({ success: false, message: 'Invalid user data' });
+        }
+
         const currentUser = await User.findById(user._id).select('name phone email role notifications').lean();
+        
+        if (!currentUser) {
+            return res.status(404).json({ success: false, message: 'User not found' });
+        }
+
         res.json({ success: true, data: currentUser });
     } catch (error) {
         console.error('getCurrentUser error:', error);
+        console.error('Error stack:', error.stack);
         res.status(500).json({ success: false, message: 'Server error' });
     }
 };

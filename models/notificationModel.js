@@ -13,7 +13,7 @@ const notificationSchema = new mongoose.Schema({
   },
   document: {
     type: mongoose.Schema.Types.ObjectId,
-    ref: 'Doc',
+    ref: 'Document', // Changed from 'Doc' to 'Document' to match model registration
     required: true
   },
   viewedBy: {

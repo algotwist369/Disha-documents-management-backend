@@ -12,6 +12,7 @@ const {
   additionalSecurityChecks,
   requestSizeCheck
 } = require('./middleware/securityMiddleware');
+const { errorHandler, notFoundHandler } = require('./middleware/errorHandler');
 
 require('dotenv').config();
 
@@ -59,7 +60,7 @@ app.use(helmet({
 
 // CORS configuration - restrict origins in production
 // Split and trim to allow values like "https://369.ciphra.in" even if spaces exist in .env
-const allowedOrigins = process.env.ALLOWED_ORIGINS || 'https://ddm.api.d0s369.co.in'
+const allowedOrigins = process.env.ALLOWED_ORIGINS
   ? process.env.ALLOWED_ORIGINS.split(',').map(s => s.trim()).filter(Boolean)
   : process.env.NODE_ENV === 'production' 
     ? [] // Production: require explicit ALLOWED_ORIGINS
@@ -169,19 +170,11 @@ app.use('/api/documents', require('./routes/documentRoutes'));
 app.use('/api/categories', require('./routes/categoryRoutes'));
 app.use('/api/super-admin', require('./routes/superAdminRoutes'));
 
-// 404 handler
-app.use((req, res) => {
-  res.status(404).json({ success: false, message: 'Route not found' });
-});
+// 404 handler (must be before error handler)
+app.use(notFoundHandler);
 
-// Global error handler
-app.use((err, req, res, next) => {
-  console.error('Unhandled error:', err);
-  res.status(err.status || 500).json({ 
-    success: false, 
-    message: process.env.NODE_ENV === 'production' ? 'Internal server error' : err.message 
-  });
-});
+// Global error handler (must be last)
+app.use(errorHandler);
 
 const PORT = process.env.PORT || 5000;
 let server;
@@ -316,21 +309,6 @@ const gracefulShutdown = async (signal) => {
 // Listen for termination signals
 process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 process.on('SIGINT', () => gracefulShutdown('SIGINT'));
-
-// Global error handler middleware (must be last)
-app.use((err, req, res, next) => {
-  console.error('Global error handler:', err.message || err);
-  
-  // Don't expose internal error details in production
-  const message = process.env.NODE_ENV === 'production' 
-    ? 'An internal server error occurred' 
-    : err.message || 'An error occurred';
-  
-  res.status(err.status || 500).json({
-    success: false,
-    message: message
-  });
-});
 
 // Handle uncaught exceptions and unhandled rejections
 process.on('uncaughtException', (err) => {

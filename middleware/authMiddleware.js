@@ -102,7 +102,14 @@ const protect = async (req, res, next) => {
 // Role-based guard (exact match)
 const requireRole = (role) => (req, res, next) => {
   if (!req.user) return res.status(401).json({ success: false, message: 'Not authenticated' });
-  if (req.user.role !== role) return res.status(403).json({ success: false, message: 'Forbidden' });
+  if (req.user.role !== role) {
+    return res.status(403).json({ 
+      success: false, 
+      message: `Access denied. This action requires ${role} role. Your current role is ${req.user.role}.`,
+      requiredRole: role,
+      currentRole: req.user.role
+    });
+  }
   next();
 };
 
