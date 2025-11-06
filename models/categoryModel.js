@@ -31,9 +31,11 @@ const categorySchema = new mongoose.Schema({
     }
 });
 
-// Index for performance
+// Indexes for performance
 // Note: name already has unique index from schema definition
 categorySchema.index({ isActive: 1 });
+categorySchema.index({ createdAt: -1 }); // For sorting
+categorySchema.index({ createdBy: 1 }); // For filtering by creator
 
 const Category = mongoose.model('Category', categorySchema);
 module.exports = Category;

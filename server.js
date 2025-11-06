@@ -13,6 +13,7 @@ const {
   requestSizeCheck
 } = require('./middleware/securityMiddleware');
 const { errorHandler, notFoundHandler } = require('./middleware/errorHandler');
+const performanceMonitor = require('./middleware/performance');
 
 require('dotenv').config();
 
@@ -106,7 +107,22 @@ app.use(cors({
 }));
 
 // Compression middleware for better performance
-app.use(compression());
+app.use(compression({
+  level: 6, // Balance between compression and CPU usage
+  threshold: 1024, // Only compress responses larger than 1KB
+  filter: (req, res) => {
+    // Don't compress if client doesn't support it
+    if (req.headers['x-no-compression']) {
+      return false;
+    }
+    // Use compression for JSON and text responses
+    const contentType = res.getHeader('content-type') || '';
+    return /json|text|javascript|css|html/.test(contentType);
+  }
+}));
+
+// Performance monitoring middleware
+app.use(performanceMonitor);
 
 // Request logging
 if (process.env.NODE_ENV === 'production') {

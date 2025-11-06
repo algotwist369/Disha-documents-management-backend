@@ -52,6 +52,8 @@ const userSchema = new mongoose.Schema({
 // Indexes for performance
 // Note: phone already has unique index from schema definition
 userSchema.index({ role: 1 });
+userSchema.index({ email: 1 }); // For email lookups
+userSchema.index({ createdAt: -1 }); // For sorting by creation date
 
 // Hash password before save
 userSchema.pre('save', async function (next) {

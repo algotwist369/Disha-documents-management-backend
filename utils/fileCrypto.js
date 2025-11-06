@@ -57,10 +57,22 @@ const encryptFile = (inputPath, outputPath) => new Promise((resolve, reject) => 
 // Decrypt by creating a read stream that strips appended auth/iv
 const createDecryptionStream = (filePath) => {
   const key = getKey();
-  if (!key) return fs.createReadStream(filePath);
+  if (!key) {
+    // No encryption key, return plain file stream
+    return fs.createReadStream(filePath);
+  }
   
   try {
+    // Check if file exists and get stats
+    if (!fs.existsSync(filePath)) {
+      throw new Error(`File not found: ${filePath}`);
+    }
+    
     const stats = fs.statSync(filePath);
+    if (!stats.isFile()) {
+      throw new Error(`Path is not a file: ${filePath}`);
+    }
+    
     const metaLen = 12 + 16; // iv + authTag
     
     // If file is too small to contain metadata, it's not encrypted
@@ -69,23 +81,73 @@ const createDecryptionStream = (filePath) => {
     }
     
     const dataLen = stats.size - metaLen;
+    
+    // Validate dataLen is positive
+    if (dataLen <= 0) {
+      console.warn('Invalid file size for decryption, returning plain stream');
+      return fs.createReadStream(filePath);
+    }
+    
     const fd = fs.openSync(filePath, 'r');
-    // read iv and auth tag from end
-    const metaBuf = Buffer.alloc(metaLen);
-    fs.readSync(fd, metaBuf, 0, metaLen, dataLen);
-    const iv = metaBuf.slice(0, 12);
-    const authTag = metaBuf.slice(12);
+    
+    try {
+      // read iv and auth tag from end
+      const metaBuf = Buffer.alloc(metaLen);
+      const bytesRead = fs.readSync(fd, metaBuf, 0, metaLen, dataLen);
+      
+      if (bytesRead !== metaLen) {
+        fs.closeSync(fd);
+        throw new Error(`Failed to read metadata: expected ${metaLen} bytes, got ${bytesRead}`);
+      }
+      
+      const iv = metaBuf.slice(0, 12);
+      const authTag = metaBuf.slice(12);
 
-    const decipher = crypto.createDecipheriv(ALGORITHM, key, iv);
-    decipher.setAuthTag(authTag);
+      const decipher = crypto.createDecipheriv(ALGORITHM, key, iv);
+      decipher.setAuthTag(authTag);
+      
+      // Handle decipher errors
+      decipher.on('error', (err) => {
+        console.error('Decipher error:', err.message);
+        fs.closeSync(fd);
+      });
 
-    // create read stream for encrypted data portion only
-    const encStream = fs.createReadStream(null, { fd, start: 0, end: dataLen - 1, autoClose: true });
-    return encStream.pipe(decipher);
+      // create read stream for encrypted data portion only
+      const encStream = fs.createReadStream(null, { 
+        fd, 
+        start: 0, 
+        end: dataLen - 1, 
+        autoClose: true 
+      });
+      
+      // Handle stream errors
+      encStream.on('error', (err) => {
+        console.error('Encrypted stream error:', err.message);
+        try {
+          fs.closeSync(fd);
+        } catch (closeErr) {
+          // Ignore close errors
+        }
+      });
+      
+      return encStream.pipe(decipher);
+    } catch (metaError) {
+      fs.closeSync(fd);
+      throw metaError;
+    }
   } catch (err) {
     // If decryption setup fails, return plain file stream
     console.error('Decryption stream setup error:', err.message);
-    return fs.createReadStream(filePath);
+    console.error('Error stack:', err.stack);
+    console.error('Falling back to plain file stream for:', filePath);
+    
+    // Try to return plain stream as fallback
+    try {
+      return fs.createReadStream(filePath);
+    } catch (fallbackError) {
+      console.error('Fallback stream creation failed:', fallbackError.message);
+      throw new Error(`Failed to create file stream: ${fallbackError.message}`);
+    }
   }
 };
 

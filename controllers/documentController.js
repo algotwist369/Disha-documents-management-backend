@@ -7,6 +7,7 @@ const { encryptFile, createDecryptionStream } = require('../utils/fileCrypto');
 const { compressFile, isGzipped } = require('../utils/fileCompression');
 const AuditLog = require('../models/auditLog');
 const { getClientIP } = require('../utils/ipExtractor');
+const { statsCache, categoryCache } = require('../utils/cache');
 const fs = require('fs');
 const path = require('path');
 
@@ -179,6 +180,9 @@ const createDocument = async (req, res) => {
       console.error('audit log error', e); 
     }
 
+    // Invalidate stats cache for all users (since new document affects stats)
+    statsCache.clear();
+
     res.status(201).json({ success: true, data: doc });
   } catch (err) {
     console.error('createDocument error', err.message || err);
@@ -253,13 +257,25 @@ const getDocuments = async (req, res) => {
       query.originalName = { $regex: req.query.fileName, $options: 'i' };
     }
 
+    // Optimize populate - reduce unnecessary data loading
+    // Only populate permissions if user is not super_admin (they don't need permission details for viewing)
+    const populateOptions = [
+      { path: 'user', select: 'name phone role' },
+      { path: 'category', select: 'name description' }
+    ];
+    
+    // For non-super-admin users, include permission arrays (limited to prevent large payloads)
+    if (user.role !== 'super_admin') {
+      populateOptions.push(
+        { path: 'permissionToView', select: 'name phone', options: { limit: 20 } },
+        { path: 'permissionToDownload', select: 'name phone', options: { limit: 20 } },
+        { path: 'permissionToDelete', select: 'name phone', options: { limit: 20 } }
+      );
+    }
+
     const [docs, total] = await Promise.all([
       Doc.find(query)
-        .populate('user', 'name phone role')
-        .populate('category', 'name description')
-        .populate('permissionToView', 'name phone')
-        .populate('permissionToDownload', 'name phone')
-        .populate('permissionToDelete', 'name phone')
+        .populate(populateOptions)
         .sort(sort)
         .skip(skip)
         .limit(limit)
@@ -350,13 +366,24 @@ const getDocumentsByUserId = async (req, res) => {
       query.fileType = { $in: fileTypes };
     }
 
+    // Optimize populate - reduce unnecessary data loading
+    const populateOptions = [
+      { path: 'user', select: 'name phone role' },
+      { path: 'category', select: 'name description' }
+    ];
+    
+    // Only populate permissions if user is not super_admin
+    if (authUser.role !== 'super_admin') {
+      populateOptions.push(
+        { path: 'permissionToView', select: 'name phone', options: { limit: 20 } },
+        { path: 'permissionToDownload', select: 'name phone', options: { limit: 20 } },
+        { path: 'permissionToDelete', select: 'name phone', options: { limit: 20 } }
+      );
+    }
+
     const [docs, total] = await Promise.all([
       Doc.find(query)
-        .populate('user', 'name phone role')
-        .populate('category', 'name description')
-        .populate('permissionToView', 'name phone')
-        .populate('permissionToDownload', 'name phone')
-        .populate('permissionToDelete', 'name phone')
+        .populate(populateOptions)
         .sort(sort)
         .skip(skip)
         .limit(limit)
@@ -393,12 +420,24 @@ const getDocumentById = async (req, res) => {
     }
   }
 
+    // Optimize populate based on user role
+    const populateOptions = [
+      { path: 'user', select: 'name phone role' },
+      { path: 'category', select: 'name description' }
+    ];
+    
+    // Only populate permissions if user is not super_admin
+    if (user.role !== 'super_admin') {
+      populateOptions.push(
+        { path: 'permissionToView', select: 'name phone' },
+        { path: 'permissionToDownload', select: 'name phone' },
+        { path: 'permissionToDelete', select: 'name phone' }
+      );
+    }
+    
     const doc = await Doc.findById(id)
-      .populate('user', 'name phone role')
-      .populate('category', 'name description')
-      .populate('permissionToView', 'name phone')
-      .populate('permissionToDownload', 'name phone')
-      .populate('permissionToDelete', 'name phone');
+      .populate(populateOptions)
+      .lean();
     if (!doc) return res.status(404).json({ success: false, message: 'Document not found' });
     // All authenticated users can view document details
     res.json({ success: true, data: doc });
@@ -489,6 +528,10 @@ const updateDocument = async (req, res) => {
 
     doc.updatedAt = Date.now();
     await doc.save();
+    
+    // Invalidate stats cache
+    statsCache.clear();
+    
     res.json({ success: true, data: doc });
   } catch (err) {
     console.error('updateDocument error', err.message || err);
@@ -529,6 +572,9 @@ const deleteDocument = async (req, res) => {
     // delete file
     try { deleteFile(doc.filePath); } catch (e) { /* ignore */ }
     await doc.deleteOne();
+    
+    // Invalidate stats cache
+    statsCache.clear();
     
     // Audit log delete
     try {
@@ -716,25 +762,71 @@ const viewDocumentFile = async (req, res) => {
       }).catch(err => console.error('sendMail error', err));
     }
 
+    // Verify file exists and is readable before attempting to stream
+    try {
+      const stats = fs.statSync(filePath);
+      if (!stats.isFile()) {
+        return res.status(404).json({ success: false, message: 'File not found or is not a file' });
+      }
+    } catch (statError) {
+      console.error('File stat error:', statError);
+      return res.status(404).json({ success: false, message: 'File not found or inaccessible' });
+    }
+
     // Check if file is compressed and handle accordingly
     let stream;
+    let streamErrorOccurred = false;
+    
     try {
       stream = createDecryptionStream(filePath);
       
       // If file is compressed (stored in database), decompress on-the-fly
       if (doc.isCompressed) {
         const zlib = require('zlib');
-        stream = stream.pipe(zlib.createGunzip());
+        const gunzip = zlib.createGunzip();
+        
+        // Handle gunzip errors
+        gunzip.on('error', (gunzipError) => {
+          if (!streamErrorOccurred) {
+            streamErrorOccurred = true;
+            console.error('Gunzip error during view:', gunzipError);
+            if (!res.headersSent) {
+              res.status(500).json({ success: false, message: 'Error decompressing file' });
+            } else {
+              res.destroy();
+            }
+            if (stream && !stream.destroyed) stream.destroy();
+          }
+        });
+        
+        stream = stream.pipe(gunzip);
       }
     } catch (decryptError) {
       console.error('Decryption error:', decryptError);
+      console.error('Decryption error stack:', decryptError.stack);
       // If decryption fails (no key), try direct file access
       try {
         stream = fs.createReadStream(filePath);
+        
         // If compressed, decompress
         if (doc.isCompressed) {
           const zlib = require('zlib');
-          stream = stream.pipe(zlib.createGunzip());
+          const gunzip = zlib.createGunzip();
+          
+          gunzip.on('error', (gunzipError) => {
+            if (!streamErrorOccurred) {
+              streamErrorOccurred = true;
+              console.error('Gunzip error (fallback) during view:', gunzipError);
+              if (!res.headersSent) {
+                res.status(500).json({ success: false, message: 'Error decompressing file' });
+              } else {
+                res.destroy();
+              }
+              if (stream && !stream.destroyed) stream.destroy();
+            }
+          });
+          
+          stream = stream.pipe(gunzip);
         }
       } catch (fileError) {
         console.error('File stream error:', fileError);
@@ -743,39 +835,73 @@ const viewDocumentFile = async (req, res) => {
       }
     }
     
+    // Set headers before piping
     const contentType = doc.mimeType || 'application/octet-stream';
+    const safeFilename = (doc.originalName || path.basename(doc.filePath) || 'document').replace(/[^a-zA-Z0-9._-]/g, '_');
+    
     res.setHeader('Content-Type', contentType);
-    res.setHeader('Content-Disposition', `inline; filename="${doc.originalName || doc.filePath}"`);
+    res.setHeader('Content-Disposition', `inline; filename="${safeFilename}"`);
     
     // Handle stream errors that occur during pipe operation
-    let responseSent = false;
     const handleStreamError = (error) => {
-      if (!responseSent) {
-        responseSent = true;
+      if (!streamErrorOccurred) {
+        streamErrorOccurred = true;
         console.error('Stream error during view:', error);
         console.error('Stream error stack:', error.stack);
         console.error('Stream error details:', {
           message: error.message,
           name: error.name,
-          code: error.code
+          code: error.code,
+          filePath: filePath,
+          docId: doc._id
         });
-        if (!res.headersSent) {
-          res.status(500).json({ success: false, message: 'An error occurred while viewing the document' });
-        } else {
-          res.destroy();
+        try {
+          if (!res.headersSent) {
+            res.status(500).json({ success: false, message: 'An error occurred while viewing the document' });
+          } else {
+            res.destroy();
+          }
+        } catch (responseError) {
+          console.error('Error sending error response:', responseError);
+        }
+        // Clean up streams
+        if (stream && !stream.destroyed) {
+          stream.destroy();
         }
       }
     };
     
+    // Attach error handlers before piping
     stream.on('error', handleStreamError);
     res.on('error', handleStreamError);
+    
+    // Handle client disconnect
     res.on('close', () => {
       if (stream && !stream.destroyed) {
         stream.destroy();
       }
     });
     
-    return stream.pipe(res);
+    // Handle successful completion
+    stream.on('end', () => {
+      if (!streamErrorOccurred && !res.headersSent) {
+        // This shouldn't happen, but just in case
+        console.warn('Stream ended but response not sent');
+      }
+    });
+    
+    // Pipe stream to response
+    try {
+      stream.pipe(res);
+    } catch (pipeError) {
+      console.error('Pipe error during view:', pipeError);
+      if (!res.headersSent) {
+        res.status(500).json({ success: false, message: 'An error occurred while viewing the document' });
+      }
+      if (stream && !stream.destroyed) {
+        stream.destroy();
+      }
+    }
   } catch (err) {
     console.error('viewDocumentFile error:', err);
     console.error('Error stack:', err.stack);
@@ -938,62 +1064,151 @@ const downloadDocumentFile = async (req, res) => {
       return res.status(403).json({ success: false, message: 'Invalid file path' });
     }
     
-    if (!fs.existsSync(downloadFilePath)) {
-      return res.status(404).json({ success: false, message: 'File not found' });
+    // Verify file exists and is readable before attempting to stream
+    try {
+      if (!fs.existsSync(downloadFilePath)) {
+        return res.status(404).json({ success: false, message: 'File not found' });
+      }
+      
+      const stats = fs.statSync(downloadFilePath);
+      if (!stats.isFile()) {
+        return res.status(404).json({ success: false, message: 'File not found or is not a file' });
+      }
+    } catch (statError) {
+      console.error('File stat error:', statError);
+      console.error('File stat error stack:', statError.stack);
+      return res.status(404).json({ success: false, message: 'File not found or inaccessible' });
     }
 
     // Stream decrypted content as attachment
     let downloadStream;
+    let streamErrorOccurred = false;
+    
     try {
       downloadStream = createDecryptionStream(downloadFilePath);
       
       // If file is compressed, decompress on-the-fly
       if (doc.isCompressed) {
         const zlib = require('zlib');
-        downloadStream = downloadStream.pipe(zlib.createGunzip());
+        const gunzip = zlib.createGunzip();
+        
+        // Handle gunzip errors
+        gunzip.on('error', (gunzipError) => {
+          if (!streamErrorOccurred) {
+            streamErrorOccurred = true;
+            console.error('Gunzip error during download:', gunzipError);
+            if (!res.headersSent) {
+              res.status(500).json({ success: false, message: 'Error decompressing file' });
+            } else {
+              res.destroy();
+            }
+            if (downloadStream && !downloadStream.destroyed) downloadStream.destroy();
+          }
+        });
+        
+        downloadStream = downloadStream.pipe(gunzip);
       }
     } catch (decryptError) {
+      console.error('Decryption error:', decryptError);
+      console.error('Decryption error stack:', decryptError.stack);
       // If decryption fails (no key), try direct file access
       try {
         downloadStream = fs.createReadStream(downloadFilePath);
+        
         // If compressed, decompress
         if (doc.isCompressed) {
           const zlib = require('zlib');
-          downloadStream = downloadStream.pipe(zlib.createGunzip());
+          const gunzip = zlib.createGunzip();
+          
+          gunzip.on('error', (gunzipError) => {
+            if (!streamErrorOccurred) {
+              streamErrorOccurred = true;
+              console.error('Gunzip error (fallback) during download:', gunzipError);
+              if (!res.headersSent) {
+                res.status(500).json({ success: false, message: 'Error decompressing file' });
+              } else {
+                res.destroy();
+              }
+              if (downloadStream && !downloadStream.destroyed) downloadStream.destroy();
+            }
+          });
+          
+          downloadStream = downloadStream.pipe(gunzip);
         }
       } catch (fileError) {
         console.error('File stream error:', fileError);
+        console.error('File stream error stack:', fileError.stack);
         return res.status(500).json({ success: false, message: 'Error reading file' });
       }
     }
     
+    // Set headers before piping
     const contentType = doc.mimeType || 'application/octet-stream';
+    const safeFilename = (doc.originalName || path.basename(doc.filePath) || 'document').replace(/[^a-zA-Z0-9._-]/g, '_');
+    
     res.setHeader('Content-Type', contentType);
-    res.setHeader('Content-Disposition', `attachment; filename="${doc.originalName || doc.filePath}"`);
+    res.setHeader('Content-Disposition', `attachment; filename="${safeFilename}"`);
     
     // Handle stream errors that occur during pipe operation
-    let responseSent = false;
     const handleStreamError = (error) => {
-      if (!responseSent) {
-        responseSent = true;
-        console.error('Stream error during download:', error.message || error);
-        if (!res.headersSent) {
-          res.status(500).json({ success: false, message: 'An error occurred while downloading the document' });
-        } else {
-          res.destroy();
+      if (!streamErrorOccurred) {
+        streamErrorOccurred = true;
+        console.error('Stream error during download:', error);
+        console.error('Stream error stack:', error.stack);
+        console.error('Stream error details:', {
+          message: error.message,
+          name: error.name,
+          code: error.code,
+          filePath: downloadFilePath,
+          docId: doc._id
+        });
+        try {
+          if (!res.headersSent) {
+            res.status(500).json({ success: false, message: 'An error occurred while downloading the document' });
+          } else {
+            res.destroy();
+          }
+        } catch (responseError) {
+          console.error('Error sending error response:', responseError);
+        }
+        // Clean up streams
+        if (downloadStream && !downloadStream.destroyed) {
+          downloadStream.destroy();
         }
       }
     };
     
+    // Attach error handlers before piping
     downloadStream.on('error', handleStreamError);
     res.on('error', handleStreamError);
+    
+    // Handle client disconnect
     res.on('close', () => {
       if (downloadStream && !downloadStream.destroyed) {
         downloadStream.destroy();
       }
     });
     
-    return downloadStream.pipe(res);
+    // Handle successful completion
+    downloadStream.on('end', () => {
+      if (!streamErrorOccurred && !res.headersSent) {
+        // This shouldn't happen, but just in case
+        console.warn('Stream ended but response not sent');
+      }
+    });
+    
+    // Pipe stream to response
+    try {
+      downloadStream.pipe(res);
+    } catch (pipeError) {
+      console.error('Pipe error during download:', pipeError);
+      if (!res.headersSent) {
+        res.status(500).json({ success: false, message: 'An error occurred while downloading the document' });
+      }
+      if (downloadStream && !downloadStream.destroyed) {
+        downloadStream.destroy();
+      }
+    }
   } catch (err) {
     console.error('downloadDocumentFile error:', err.message || err);
     // Don't expose internal error details
@@ -1077,58 +1292,92 @@ const getDocumentStats = async (req, res) => {
     const user = req.user;
     if (!user) return res.status(401).json({ success: false, message: 'Not authenticated' });
 
-    const matchQuery = { permissionToView: { $in: [user._id] } };
+    // Check cache first (cache key includes user ID for personalized stats)
+    const cacheKey = `stats_${user._id}`;
+    const cachedStats = statsCache.get(cacheKey);
+    if (cachedStats) {
+      return res.json(cachedStats);
+    }
 
-    const stats = await Doc.aggregate([
-      { $match: matchQuery },
-      {
-        $lookup: {
-          from: 'categories',
-          localField: 'category',
-          foreignField: '_id',
-          as: 'categoryInfo'
-        }
-      },
-      {
-        $group: {
-          _id: '$category',
-          categoryName: { $first: { $arrayElemAt: ['$categoryInfo.name', 0] } },
-          count: { $sum: 1 },
-          totalSize: { $sum: '$size' }
-        }
-      },
-      {
-        $project: {
-          _id: 0,
-          categoryId: '$_id',
-          categoryName: { $ifNull: ['$categoryName', 'Uncategorized'] },
-          count: 1,
-          totalSize: 1,
-          averageSize: { $divide: ['$totalSize', '$count'] }
-        }
-      },
-      { $sort: { count: -1 } }
+    // Build optimized query - super_admin sees all, others see shared docs
+    const matchQuery = user.role === 'super_admin' 
+      ? {} 
+      : { 
+          $or: [
+            { user: user._id },
+            { permissionToView: { $in: [user._id] } }
+          ]
+        };
+
+    // Optimize: Use parallel queries instead of aggregation for better performance
+    const [totalDocs, recentDocs, categoryStats] = await Promise.all([
+      // Total documents count
+      Doc.countDocuments(matchQuery),
+      
+      // Recent documents (last 7 days) - optimized with index
+      Doc.countDocuments({ 
+        ...matchQuery, 
+        createdAt: { $gte: new Date(Date.now() - 7 * 24 * 60 * 60 * 1000) } 
+      }),
+      
+      // Category stats - simplified aggregation
+      Doc.aggregate([
+        { $match: matchQuery },
+        {
+          $group: {
+            _id: '$category',
+            count: { $sum: 1 },
+            totalSize: { $sum: { $ifNull: ['$size', 0] } }
+          }
+        },
+        {
+          $lookup: {
+            from: 'categories',
+            localField: '_id',
+            foreignField: '_id',
+            as: 'categoryInfo'
+          }
+        },
+        {
+          $project: {
+            _id: 0,
+            categoryId: '$_id',
+            categoryName: { 
+              $ifNull: [
+                { $arrayElemAt: ['$categoryInfo.name', 0] }, 
+                'Uncategorized'
+              ] 
+            },
+            count: 1,
+            totalSize: 1,
+            averageSize: { 
+              $cond: [
+                { $eq: ['$count', 0] },
+                0,
+                { $divide: ['$totalSize', '$count'] }
+              ]
+            }
+          }
+        },
+        { $sort: { count: -1 } },
+        { $limit: 50 } // Limit to top 50 categories
+      ])
     ]);
 
-    // Get total documents
-    const totalDocs = await Doc.countDocuments(matchQuery);
-
-    // Get recent documents (last 7 days)
-    const sevenDaysAgo = new Date();
-    sevenDaysAgo.setDate(sevenDaysAgo.getDate() - 7);
-    const recentDocs = await Doc.countDocuments({ 
-      ...matchQuery, 
-      createdAt: { $gte: sevenDaysAgo } 
-    });
-
-    res.json({ 
+    const response = { 
       success: true,
       totalDocuments: totalDocs,
       recentDocuments: recentDocs,
-      categories: stats
-    });
+      categories: categoryStats
+    };
+
+    // Cache the result for 1 minute
+    statsCache.set(cacheKey, response, 60000);
+
+    res.json(response);
   } catch (err) {
     console.error('getDocumentStats error', err.message || err);
+    console.error('Error stack:', err.stack);
     res.status(500).json({ success: false, message: 'Server error' });
   }
 };
