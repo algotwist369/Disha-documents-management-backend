@@ -1,25 +1,42 @@
 const nodemailer = require('nodemailer');
-const dotenv = require('dotenv');
+require('dotenv').config();
 
-dotenv.config();
-
-// Contract:
-// - inputs: { to, subject, text, html, attachments }
-// - outputs: result info from nodemailer or thrown error
-// - errors: throws when transport config missing or send fails
+const parseBoolean = (value, fallback = undefined) => {
+    if (value === undefined || value === null || value === '') return fallback;
+    return value === true || value === 'true' || value === '1';
+};
 
 const createTransport = () => {
-    const { SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_SECURE } = process.env;
+    const {
+        SMTP_HOST,
+        SMTP_PORT,
+        SMTP_USER,
+        SMTP_PASS,
+        SMTP_SECURE,
+        SMTP_TLS_REJECT_UNAUTHORIZED,
+    } = process.env;
 
     if (!SMTP_HOST || !SMTP_PORT) {
         throw new Error('SMTP configuration missing: please set SMTP_HOST and SMTP_PORT in environment');
     }
 
+    const numericPort = Number(SMTP_PORT);
+    const secureFlag = parseBoolean(SMTP_SECURE);
+    const secure =
+        secureFlag !== undefined
+            ? secureFlag
+            : numericPort === 465 // implicit TLS
+                ? true
+                : false; // default STARTTLS/PLAIN
+
     return nodemailer.createTransport({
-        host: SMTP_HOST,
-        port: Number(SMTP_PORT),
-        secure: SMTP_SECURE === 'true' || SMTP_SECURE === '1',
+        host: SMTP_HOST.replace(/^https?:\/\//i, ''), // guard against accidental scheme prefixes
+        port: numericPort,
+        secure,
         auth: SMTP_USER && SMTP_PASS ? { user: SMTP_USER, pass: SMTP_PASS } : undefined,
+        tls: {
+            rejectUnauthorized: parseBoolean(SMTP_TLS_REJECT_UNAUTHORIZED, true),
+        },
     });
 };
 
